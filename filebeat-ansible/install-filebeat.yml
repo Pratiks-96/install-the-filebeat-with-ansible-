@@ -1,0 +1,122 @@
+---
+- name: Install and Configure Filebeat
+  hosts: filebeat_servers
+  become: yes
+
+  vars:
+    elk_server_ip: "20.198.104.118"
+
+  tasks:
+    - name: Remove old Elastic repository files
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/elastic-8.x.list
+        - /etc/apt/sources.list.d/elastic.list
+
+    - name: Remove old Elastic key file if present
+      ansible.builtin.file:
+        path: /usr/share/keyrings/elastic-keyring.asc
+        state: absent
+
+    - name: Download and install Elastic GPG key
+      ansible.builtin.shell: |
+        curl -fsSL https://artifacts.elastic.co/GPG-KEY-elasticsearch \
+        | gpg --dearmor \
+        -o /usr/share/keyrings/elastic-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/elastic-keyring.gpg
+
+    - name: Add Elastic APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/usr/share/keyrings/elastic-keyring.gpg] https://artifacts.elastic.co/packages/8.x/apt stable main"
+        filename: elastic-8.x
+        state: present
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Filebeat
+      ansible.builtin.apt:
+        name: filebeat
+        state: present
+
+    - name: Create Filebeat configuration
+      ansible.builtin.copy:
+        dest: /etc/filebeat/filebeat.yml
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          filebeat.inputs:
+            - type: filestream
+              id: auth-log
+              enabled: true
+              paths:
+                - /var/log/auth.log
+
+          output.logstash:
+            hosts: ["{{ elk_server_ip }}:5044"]
+
+          setup.template.enabled: false
+          setup.ilm.enabled: false
+
+          logging.level: info
+
+    - name: Enable and start Filebeat
+      ansible.builtin.systemd:
+        name: filebeat
+        enabled: yes
+        state: restarted
+
+    - name: Wait for Filebeat to start
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Check Filebeat service status
+      ansible.builtin.command: systemctl is-active filebeat
+      register: filebeat_status
+      changed_when: false
+
+    - name: Display Filebeat service status
+      ansible.builtin.debug:
+        msg: "Filebeat service status: {{ filebeat_status.stdout }}"
+
+    - name: Test Filebeat output connection to Logstash
+      ansible.builtin.command: filebeat test output
+      register: filebeat_test
+      changed_when: false
+
+    - name: Show Filebeat output test result
+      ansible.builtin.debug:
+        var: filebeat_test.stdout_lines
+
+    - name: Generate test log entry
+      ansible.builtin.shell: |
+        logger "ANSIBLE FILEBEAT TEST $(date)"
+      changed_when: true
+
+    - name: Wait for log to be processed
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Show recent auth logs
+      ansible.builtin.shell: tail -n 20 /var/log/auth.log
+      register: auth_logs
+      changed_when: false
+
+    - name: Display auth log entries
+      ansible.builtin.debug:
+        var: auth_logs.stdout_lines
+
+    - name: Show recent Filebeat logs
+      ansible.builtin.shell: tail -n 30 /var/log/filebeat/filebeat
+      register: filebeat_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Display Filebeat logs
+      ansible.builtin.debug:
+        var: filebeat_logs.stdout_lines
